@@ -15,10 +15,10 @@ import {
   HORARIOS,
   NOME_BARBEARIA,
   formatarData,
-  hojeISO,
   linkWhatsApp,
   mensagemWhatsApp,
 } from "@/lib/barbearia";
+import { agoraEmMaputo, horaJaPassou, useAgoraMaputo } from "@/lib/fuso";
 
 type Ocupado = { hora: string; status: string };
 
@@ -29,13 +29,24 @@ export function Home() {
   );
 
   const queryClient = useQueryClient();
-  const [data, setData] = useState(hojeISO());
+  const agora = useAgoraMaputo();
+  const [data, setData] = useState(() => agoraEmMaputo().dataISO);
   const [hora, setHora] = useState<string | null>(null);
   const [servicoId, setServicoId] = useState(SERVICOS[0]!.id);
   const [nome, setNome] = useState("");
   const [telefone, setTelefone] = useState("");
   const [notas, setNotas] = useState("");
   const [confirmado, setConfirmado] = useState<null | { hora: string; link: string }>(null);
+
+  // Se a meia-noite passar, a data escolhida nunca fica no passado.
+  useEffect(() => {
+    if (data < agora.dataISO) setData(agora.dataISO);
+  }, [data, agora.dataISO]);
+
+  // Se o horário escolhido expirar enquanto o cliente preenche, é desmarcado.
+  useEffect(() => {
+    if (hora && horaJaPassou(data, hora, agora)) setHora(null);
+  }, [agora, data, hora]);
 
   const servico = useMemo(() => SERVICOS.find((s) => s.id === servicoId)!, [servicoId]);
 
@@ -68,6 +79,7 @@ export function Home() {
   const agendar = useMutation({
     mutationFn: async () => {
       if (!hora) throw new Error("Escolha um horário.");
+      if (horaJaPassou(data, hora)) throw new Error("Esse horário já passou. Escolha outro.");
       if (nome.trim().length < 2) throw new Error("Escreva o seu nome.");
       if (telefone.trim().length !== 9) throw new Error("O número deve ter 9 dígitos.");
       const { error } = await supabase.from("agendamentos").insert({
@@ -159,7 +171,7 @@ export function Home() {
         <Input
           type="date"
           value={data}
-          min={hojeISO()}
+          min={agora.dataISO}
           onChange={(e) => {
             setData(e.target.value);
             setHora(null);
@@ -172,17 +184,19 @@ export function Home() {
         </h2>
         <div className="mt-3 grid grid-cols-3 gap-2 sm:grid-cols-7">
           {HORARIOS.map((h) => {
-            const estado = estadoDe(h);
-            const ocupado = estado !== null;
+            const ocupado = estadoDe(h) !== null;
+            const passou = horaJaPassou(data, h, agora);
+            const indisponivel = ocupado || passou;
             const activo = hora === h;
             return (
               <button
                 key={h}
                 type="button"
-                disabled={ocupado}
+                disabled={indisponivel}
+                title={passou ? "Este horário já passou" : ocupado ? "Horário ocupado" : undefined}
                 onClick={() => setHora(h)}
                 className={`rounded border-2 py-2 font-display text-base transition-colors ${
-                  ocupado
+                  indisponivel
                     ? "cursor-not-allowed border-border bg-muted text-muted-foreground line-through"
                     : activo
                       ? "border-ink bg-primary text-primary-foreground"
@@ -200,7 +214,7 @@ export function Home() {
           ) : (
             <span className="inline-block size-2 rounded-full bg-success" />
           )}
-          Disponibilidade actualizada em tempo real
+          Horários riscados estão ocupados ou já passaram (hora de Maputo) · actualizado em tempo real
         </p>
 
         <h2 className="mt-8 text-2xl">4. Os seus dados</h2>
