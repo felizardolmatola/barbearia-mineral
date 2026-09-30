@@ -17,10 +17,42 @@ import {
   formatarData,
   linkWhatsApp,
   mensagemWhatsApp,
+  SERVICOS_EXTRA,
+  TELEFONE_BARBEARIA_EXIBIDO,
+  linkChamada,
+  linkSMS,
+  servicosPorPublico,
+  idParaPublico,
+  type PublicoServico,
 } from "@/lib/barbearia";
 import { agoraEmMaputo, horaJaPassou, useAgoraMaputo } from "@/lib/fuso";
 
+// Acima deste valor (em metros) a localização é considerada pouco precisa.
+const PRECISAO_BAIXA_M = 100;
+
 type Ocupado = { hora: string; status: string };
+
+// Secções da lista de serviços: cortes na barbearia e ao domicílio.
+const SECOES_SERVICOS = [
+  { categoria: "barbearia", titulo: "Corte na barbearia" },
+  { categoria: "domicilio", titulo: "Corte a domicílio" },
+] as const;
+
+// Estado da ligação à internet do cliente.
+function useOnline(): boolean {
+  const [online, setOnline] = useState(() => (typeof navigator === "undefined" ? true : navigator.onLine));
+  useEffect(() => {
+    const ligar = () => setOnline(true);
+    const desligar = () => setOnline(false);
+    window.addEventListener("online", ligar);
+    window.addEventListener("offline", desligar);
+    return () => {
+      window.removeEventListener("online", ligar);
+      window.removeEventListener("offline", desligar);
+    };
+  }, []);
+  return online;
+}
 
 export function Home() {
   useDocumentTitle(
@@ -30,12 +62,21 @@ export function Home() {
 
   const queryClient = useQueryClient();
   const agora = useAgoraMaputo();
+  const online = useOnline();
   const [data, setData] = useState(() => agoraEmMaputo().dataISO);
   const [hora, setHora] = useState<string | null>(null);
   const [servicoId, setServicoId] = useState(SERVICOS[0]!.id);
+  // Adulto/menores é escolhido separadamente em cada secção.
+  const [publicos, setPublicos] = useState<Record<"barbearia" | "domicilio", PublicoServico>>({
+    barbearia: "adulto",
+    domicilio: "adulto",
+  });
+  const [extrasIds, setExtrasIds] = useState<string[]>([]);
   const [nome, setNome] = useState("");
   const [telefone, setTelefone] = useState("");
   const [notas, setNotas] = useState("");
+  const [localizacao, setLocalizacao] = useState<null | { lat: number; lng: number; precisao: number }>(null);
+  const [aLocalizar, setALocalizar] = useState(false);
   const [confirmado, setConfirmado] = useState<null | { hora: string; link: string }>(null);
 
   // Se a meia-noite passar, a data escolhida nunca fica no passado.
@@ -49,6 +90,78 @@ export function Home() {
   }, [agora, data, hora]);
 
   const servico = useMemo(() => SERVICOS.find((s) => s.id === servicoId)!, [servicoId]);
+
+  const extras = useMemo(
+    () => SERVICOS_EXTRA.filter((s) => extrasIds.includes(s.id) && s.id !== servicoId),
+    [extrasIds, servicoId],
+  );
+
+  const nomeServicos = [servico.nome, ...extras.map((s) => s.nome)].join(" + ");
+  const total = servico.preco + extras.reduce((soma, s) => soma + s.preco, 0);
+
+  // Ao mudar entre adulto/menor, o corte escolhido passa para o equivalente do outro público.
+  const escolherPublico = (categoria: "barbearia" | "domicilio", novo: PublicoServico) => {
+    setPublicos((atual) => ({ ...atual, [categoria]: novo }));
+    // Só converte a seleção se o serviço escolhido for desta secção.
+    setServicoId((atual) =>
+      SERVICOS.find((s) => s.id === atual)?.categoria === categoria ? idParaPublico(atual, novo) : atual,
+    );
+  };
+
+  // Localização do cliente (só é enviada quando o serviço é ao domicílio).
+  const linkLocalizacao =
+    localizacao && servico.categoria === "domicilio"
+      ? `https://www.google.com/maps?q=${localizacao.lat.toFixed(6)},${localizacao.lng.toFixed(6)}`
+      : null;
+
+  const notasFinais = [notas.trim(), linkLocalizacao ? `Localização: ${linkLocalizacao}` : ""]
+    .filter(Boolean)
+    .join("\n");
+
+  const usarLocalizacao = () => {
+    if (!("geolocation" in navigator)) {
+      toast.error("O seu navegador não suporta localização. Escreva o endereço.");
+      return;
+    }
+    setALocalizar(true);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setLocalizacao({
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+          precisao: Math.round(pos.coords.accuracy),
+        });
+        setALocalizar(false);
+        if (pos.coords.accuracy > PRECISAO_BAIXA_M) {
+          toast.warning("Localização pouco precisa. Ligue o GPS do telemóvel e toque em Atualizar localização.");
+        } else {
+          toast.success("Localização adicionada ao pedido.");
+        }
+      },
+      (err) => {
+        setALocalizar(false);
+        toast.error(
+          err.code === err.PERMISSION_DENIED
+            ? "Permissão negada. Ative a localização nas definições do navegador."
+            : "Não foi possível obter a localização. Tente de novo ou escreva o endereço.",
+        );
+      },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 },
+    );
+  };
+
+  // Texto pré-escrito para quem marcar por SMS (sem dados móveis).
+  const textoSMS = [
+    `Olá, quero marcar na ${NOME_BARBEARIA}:`,
+    nomeServicos,
+    hora ? `${formatarData(data)} às ${hora}` : formatarData(data),
+    nome.trim() ? `Nome: ${nome.trim()}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const alternarExtra = (id: string) =>
+    setExtrasIds((atual) => (atual.includes(id) ? atual.filter((x) => x !== id) : [...atual, id]));
 
   const ocupadosQuery = useQuery({
     queryKey: ["ocupados", data],
@@ -78,6 +191,7 @@ export function Home() {
 
   const agendar = useMutation({
     mutationFn: async () => {
+      if (!navigator.onLine) throw new Error("Sem ligação à internet. Marque por chamada ou SMS.");
       if (!hora) throw new Error("Escolha um horário.");
       if (horaJaPassou(data, hora)) throw new Error("Esse horário já passou. Escolha outro.");
       if (nome.trim().length < 2) throw new Error("Escreva o seu nome.");
@@ -85,13 +199,13 @@ export function Home() {
       const { error } = await supabase.from("agendamentos").insert({
         nome: nome.trim(),
         telefone: telefone.trim(),
-        servico: servico.nome,
-        preco: servico.preco,
+        servico: nomeServicos,
+        preco: total,
         local: servico.categoria,
         data,
         hora,
         status: "pendente",
-        notas: notas.trim() || null,
+        notas: notasFinais || null,
       });
       if (error) {
         if (error.code === "23505") throw new Error("Esse horário acabou de ser ocupado.");
@@ -101,12 +215,12 @@ export function Home() {
         mensagemWhatsApp({
           nome: nome.trim(),
           telefone: telefone.trim(),
-          servico: servico.nome,
-          preco: servico.preco,
+          servico: nomeServicos,
+          preco: total,
           data,
           hora,
           local: servico.categoria,
-          notas: notas.trim(),
+          notas: notasFinais,
         }),
       );
     },
@@ -117,6 +231,8 @@ export function Home() {
       window.open(link, "_blank", "noopener,noreferrer");
       setHora(null);
       setNotas("");
+      setLocalizacao(null);
+      setExtrasIds([]);
     },
     onError: (e: Error) => {
       toast.error(e.message);
@@ -145,23 +261,112 @@ export function Home() {
 
       {/* Agendamento */}
       <section className="ticket mt-8 p-4 sm:p-6">
+        {!online && (
+          <div
+            role="alert"
+            className="mb-4 rounded border-2 border-destructive bg-destructive/10 p-3 text-sm"
+          >
+            <p className="font-display text-base uppercase">Sem ligação à internet</p>
+            <p className="mt-1">
+              Não é possível marcar online agora. Marque por chamada ou SMS, que funcionam sem dados.
+            </p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <a
+                href={linkChamada()}
+                className="rounded border-2 border-ink bg-primary px-3 py-2 font-display text-sm text-primary-foreground uppercase"
+              >
+                Ligar {TELEFONE_BARBEARIA_EXIBIDO}
+              </a>
+              <a
+                href={linkSMS(textoSMS)}
+                className="rounded border-2 border-ink bg-background px-3 py-2 font-display text-sm uppercase hover:bg-muted"
+              >
+                Enviar SMS
+              </a>
+            </div>
+          </div>
+        )}
+
         <h2 className="text-2xl">1. Escolha o serviço</h2>
-        <div className="mt-3 grid gap-2 sm:grid-cols-2">
-          {SERVICOS.map((s) => {
-            const activo = s.id === servicoId;
+        {SECOES_SERVICOS.map((secao) => (
+          <div key={secao.categoria} className="mt-4">
+            <h3 className="banner-ink flex items-center gap-2 px-3 py-1 text-sm">
+              {secao.categoria === "domicilio" ? (
+                <MapPin className="size-3.5" />
+              ) : (
+                <Scissors className="size-3.5" />
+              )}
+              {secao.titulo}
+            </h3>
+            <div className="mt-2 grid grid-cols-2 gap-2" role="group" aria-label="Público">
+                {(
+                  [
+                    { valor: "adulto", rotulo: "Adulto" },
+                    { valor: "menor", rotulo: "Menores" },
+                  ] as const
+                ).map((op) => (
+                  <button
+                    key={op.valor}
+                    type="button"
+                    aria-pressed={publicos[secao.categoria] === op.valor}
+                    onClick={() => escolherPublico(secao.categoria, op.valor)}
+                    className={`rounded border-2 px-3 py-2 font-display text-sm uppercase transition-colors ${
+                      publicos[secao.categoria] === op.valor
+                        ? "border-ink bg-accent text-accent-foreground"
+                        : "border-dashed border-border bg-background hover:bg-muted"
+                    }`}
+                  >
+                    {op.rotulo}
+                  </button>
+                ))}
+            </div>
+            <div className="mt-2 grid gap-2 sm:grid-cols-2">
+              {servicosPorPublico(secao.categoria, publicos[secao.categoria]).map((s) => {
+                const activo = s.id === servicoId;
+                return (
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() => {
+                      setServicoId(s.id);
+                      setExtrasIds((atual) => atual.filter((id) => id !== s.id));
+                    }}
+                    className={`flex items-center justify-between gap-3 rounded border-2 px-3 py-2 text-left transition-colors ${
+                      activo
+                        ? "border-ink bg-primary text-primary-foreground"
+                        : "border-border bg-background hover:bg-muted"
+                    }`}
+                  >
+                    <span className="font-display text-sm uppercase">{s.nome}</span>
+                    <span className="font-display text-lg whitespace-nowrap">{s.preco} MT</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+
+        <h3 className="mt-5 font-display text-lg uppercase">Adicionar outros serviços (opcional)</h3>
+        <div className="mt-2 grid gap-2 sm:grid-cols-2">
+          {SERVICOS_EXTRA.filter((s) => s.id !== servicoId).map((s) => {
+            const marcado = extrasIds.includes(s.id);
             return (
               <button
                 key={s.id}
                 type="button"
-                onClick={() => setServicoId(s.id)}
+                aria-pressed={marcado}
+                onClick={() => alternarExtra(s.id)}
                 className={`flex items-center justify-between gap-3 rounded border-2 px-3 py-2 text-left transition-colors ${
-                  activo
-                    ? "border-ink bg-primary text-primary-foreground"
-                    : "border-border bg-background hover:bg-muted"
+                  marcado
+                    ? "border-ink bg-accent text-accent-foreground"
+                    : "border-dashed border-border bg-background hover:bg-muted"
                 }`}
               >
-                <span className="font-display text-sm uppercase">{s.nome}</span>
-                <span className="font-display text-lg whitespace-nowrap">{s.preco} MT</span>
+                <span className="flex items-center gap-2 font-display text-sm uppercase">
+                  {marcado ? <Check className="size-4" /> : <span className="size-4" />}
+                  {s.nome}
+                </span>
+                <span className="font-display text-lg whitespace-nowrap">+ {s.preco} MT</span>
               </button>
             );
           })}
@@ -249,18 +454,58 @@ export function Home() {
               placeholder="Bairro, referência ou pedido especial"
               className="mt-1 border-2 border-ink bg-background"
             />
+            {servico.categoria === "domicilio" && (
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="border-2 border-ink font-display uppercase"
+                  disabled={aLocalizar}
+                  onClick={usarLocalizacao}
+                >
+                  {aLocalizar ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <MapPin className="size-4" />
+                  )}
+                  {localizacao ? "Atualizar localização" : "Usar a minha localização"}
+                </Button>
+                {localizacao && (
+                  <>
+                    <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                      <Check className="size-3.5 text-success" />
+                      Localização adicionada (precisão ~{localizacao.precisao} m)
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setLocalizacao(null)}
+                      className="text-xs text-muted-foreground underline"
+                    >
+                      Remover
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+            {servico.categoria === "domicilio" && localizacao && localizacao.precisao > PRECISAO_BAIXA_M && (
+              <p className="mt-2 rounded border-2 border-accent bg-accent/10 p-2 text-xs">
+                Localização pouco precisa (~{localizacao.precisao} m). Ligue o GPS do telemóvel e toque em{" "}
+                <b>Atualizar localização</b>, ou escreva o bairro e uma referência acima.
+              </p>
+            )}
           </div>
         </div>
 
         <div className="mt-6 flex flex-col gap-3 border-t-2 border-dashed border-ink pt-4 sm:flex-row sm:items-center sm:justify-between">
           <p className="font-display text-lg">
-            {servico.nome} · {hora ? `${formatarData(data)} às ${hora}` : "escolha um horário"} ·{" "}
-            <span className="text-primary">{servico.preco} MT</span>
+            {nomeServicos} · {hora ? `${formatarData(data)} às ${hora}` : "escolha um horário"} ·{" "}
+            <span className="text-primary">{total} MT</span>
           </p>
           <Button
             size="lg"
             className="border-2 border-ink font-display text-base uppercase"
-            disabled={agendar.isPending || !hora}
+            disabled={agendar.isPending || !hora || !online}
             onClick={() => agendar.mutate()}
           >
             {agendar.isPending ? (

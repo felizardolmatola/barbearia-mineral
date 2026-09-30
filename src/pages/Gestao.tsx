@@ -10,6 +10,12 @@ import { Input } from "@/components/ui/input";
 import { useDocumentTitle } from "@/hooks/use-document-title";
 import { formatarData, hojeISO, HORARIOS, linkWhatsApp, NOME_BARBEARIA } from "@/lib/barbearia";
 
+/** Normaliza o telefone do cliente para o formato internacional (258...). */
+const numeroCliente = (tel: string) => {
+  const digitos = tel.replace(/\D/g, "").replace(/^0+/, "");
+  return digitos.startsWith("258") ? digitos : `258${digitos}`;
+};
+
 type Agendamento = {
   id: string;
   nome: string;
@@ -104,7 +110,7 @@ export function Gestao() {
       confirmado
         ? `Olá ${a.nome}! A sua marcação na ${NOME_BARBEARIA} está *CONFIRMADA* para ${formatarData(a.data)} às ${a.hora} — ${a.servico} (${a.preco} MT). Até já!`
         : `Olá ${a.nome}, sobre a sua marcação na ${NOME_BARBEARIA} para ${formatarData(a.data)} às ${a.hora}...`,
-      a.telefone.replace(/\D/g, "").replace(/^0+/, "").replace(/^258?/, "258"),
+      numeroCliente(a.telefone),
     );
 
   return (

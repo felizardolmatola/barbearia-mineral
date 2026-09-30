@@ -1,4 +1,4 @@
-# ✂️ Mineral Barber — Agendamento online
+\# ✂️ Mineral Barber — Agendamento online
 
 Aplicação web para marcação de cortes na **Mineral Barber**. O cliente escolhe o serviço, o dia e o horário, vê a disponibilidade em tempo real e confirma pelo WhatsApp. A equipa da barbearia tem uma área privada para confirmar, cancelar e acompanhar as marcações do dia.
 
